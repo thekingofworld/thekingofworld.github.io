@@ -382,7 +382,187 @@ exit:
 这下真相大白了，这个goroutine创建了一个死循环，一直接收transactionChan管道里的任务，并通过底层的连接进行发送，可以看到select还有一些其他的case，如responseChan、errorChan，主要还是接收发送消息后的服务端响应以及处理一些错误。
 
 ### 连接处理
+接下来我们讲讲连接处理，这一块的逻辑主要从connect()开始，上面我们分析发送消息的源码时有看到，调用sendCommandAsync时如果producer的状态不等于StateConnected（已连接），则会调用connect()，这里用到了一个lazy connect on publish的技巧，即当发送消息时才真正建立连接。同时上面也有讲到，connect的主要流程是调用NewConn函数对conn字段进行初始化，并调用conn.connect建立连接，我们先来看下NewConn函数的源码：
+```go
+func NewConn(addr string, config *Config, delegate ConnDelegate) *Conn {
+	return &Conn{
+		addr: addr,   //地址
 
+		config:   config,   //配置
+		delegate: delegate, //委托者模式的需要实现的接口
+
+		maxRdyCount:      2500,  //最大并发消息数
+		lastMsgTimestamp: time.Now().UnixNano(), //上一次收到消息时间
+
+		cmdChan:         make(chan *Command),     //接收命令的管道
+		msgResponseChan: make(chan *msgResponse), //接收消息响应的管道
+		exitChan:        make(chan int),          //退出信号的管道
+		drainReady:      make(chan int),          //清空当前未处理的消息
+	}
+}
+```
+先来看看NewConn调用，前两个参数是地址和配置项，前面已有介绍，我们看下第3个参数：delegate，这里主要使用了委托者模式，由producer实现ConnDelegate中相应的接口，Conn在接收到服务端发送回来的响应时会通过这种委托者的模式调用delegate对应的方法，我们可以看到上面生产者调用NewConn时传递的第3个参数具体内容为`&producerConnDelegate{w}`，这个结构体主要实现了一些生产者所关心的内容：服务端响应、连接错误、心跳等，其他接口都为空实现，如下：
+```go
+type producerConnDelegate struct {
+	w *Producer
+}
+
+func (d *producerConnDelegate) OnResponse(c *Conn, data []byte)       { d.w.onConnResponse(c, data) }
+func (d *producerConnDelegate) OnError(c *Conn, data []byte)          { d.w.onConnError(c, data) }
+func (d *producerConnDelegate) OnMessage(c *Conn, m *Message)         {}
+func (d *producerConnDelegate) OnMessageFinished(c *Conn, m *Message) {}
+func (d *producerConnDelegate) OnMessageRequeued(c *Conn, m *Message) {}
+func (d *producerConnDelegate) OnBackoff(c *Conn)                     {}
+func (d *producerConnDelegate) OnContinue(c *Conn)                    {}
+func (d *producerConnDelegate) OnResume(c *Conn)                      {}
+func (d *producerConnDelegate) OnIOError(c *Conn, err error)          { d.w.onConnIOError(c, err) }
+func (d *producerConnDelegate) OnHeartbeat(c *Conn)                   { d.w.onConnHeartbeat(c) }
+func (d *producerConnDelegate) OnClose(c *Conn)                       { d.w.onConnClose(c) }
+```
+接着我们再来看看conn.Connect()的具体实现，如下：
+```go
+func (c *Conn) Connect() (*IdentifyResponse, error) {
+	dialer := &net.Dialer{
+		LocalAddr: c.config.LocalAddr,
+		Timeout:   c.config.DialTimeout,
+	}
+
+	conn, err := dialer.Dial("tcp", c.addr)
+	if err != nil {
+		return nil, err
+	}
+	c.conn = conn.(*net.TCPConn)
+	c.r = conn
+	c.w = conn
+
+	_, err = c.Write(MagicV2)
+	if err != nil {
+		c.Close()
+		return nil, fmt.Errorf("[%s] failed to write magic - %s", c.addr, err)
+	}
+
+	resp, err := c.identify()
+	if err != nil {
+		return nil, err
+	}
+
+	if resp != nil && resp.AuthRequired {
+		if c.config.AuthSecret == "" {
+			c.log(LogLevelError, "Auth Required")
+			return nil, errors.New("Auth Required")
+		}
+		err := c.auth(c.config.AuthSecret)
+		if err != nil {
+			c.log(LogLevelError, "Auth Failed %s", err)
+			return nil, err
+		}
+	}
+
+	c.wg.Add(2)
+	atomic.StoreInt32(&c.readLoopRunning, 1)
+	go c.readLoop()
+	go c.writeLoop()
+	return resp, nil
+}
+```
+整个函数主要分为4个流程：
+1. 建立tcp连接
+2. 发送版本号：MagicV2
+3. 调用identify，将客户端的一些配置项传递给服务端，同时根据服务端响应进行一些配置项的设置
+4. 开启I/O循环
+前3步为nsq客户端与服务端建立完整连接的标准流程，没有特别的东西，我们重点关注I/O循环这一块，先来看下readLoop：
+```go
+func (c *Conn) readLoop() {
+	delegate := &connMessageDelegate{c}
+	for {
+		frameType, data, err := ReadUnpackedResponse(c)
+		if err != nil {
+			if !strings.Contains(err.Error(), "use of closed network connection") {
+				c.delegate.OnIOError(c, err)
+			}
+			goto exit
+		}
+		if frameType == FrameTypeResponse && bytes.Equal(data, []byte("_heartbeat_")) {
+			c.delegate.OnHeartbeat(c)
+			err := c.WriteCommand(Nop())
+			if err != nil {
+				c.delegate.OnIOError(c, err)
+				goto exit
+			}
+			continue
+		}
+
+		switch frameType {
+		case FrameTypeResponse:
+			c.delegate.OnResponse(c, data)
+		case FrameTypeMessage:
+			msg, err := DecodeMessage(data)
+			if err != nil {
+				c.delegate.OnIOError(c, err)
+				goto exit
+			}
+			msg.Delegate = delegate
+			msg.NSQDAddress = c.String()
+			
+			c.delegate.OnMessage(c, msg)
+		case FrameTypeError:
+			c.delegate.OnError(c, data)
+		default:
+			c.delegate.OnIOError(c, fmt.Errorf("unknown frame type %d", frameType))
+		}
+	}
+}
+```
+readLoop先调用ReadUnpackedResponse根据协议读取服务端发送过来的网络包，该函数具体代码在`protocol.go`文件中，主要是对协议上的处理，这里不做细讲，我们继续看接下来的逻辑，接着判断包的类型是不是心跳包，是的话直接返回响应，无须上层的生产者或消费者处理；接着是一个switch分支，有3个case：
+1. 包类型为FrameTypeResponse时，表示服务端对之前客户端发送命令的响应，比如生产者发送消息的响应
+2. 包类型为FrameTypeMessage时，表示收到消息，主要是消费者的场景会用到
+3. 包类型为FrameTypeError时，表示服务端处理发生错误
+readLoop的内容基本就是处理服务端心跳包、发回的消息、响应和错误，并调用委托者delegate通知上层的生产者或消费者，接下来我们再来分析writeLoop的源码：
+```go
+func (c *Conn) writeLoop() {
+	for {
+		select {
+		case <-c.exitChan:
+			close(c.drainReady)
+			goto exit
+		case cmd := <-c.cmdChan:
+			err := c.WriteCommand(cmd)
+			if err != nil {
+				c.close()
+				continue
+			}
+		case resp := <-c.msgResponseChan:
+			msgsInFlight := atomic.AddInt64(&c.messagesInFlight, -1)
+			if resp.success {
+				c.delegate.OnMessageFinished(c, resp.msg)
+				c.delegate.OnResume(c)
+			} else {
+				c.delegate.OnMessageRequeued(c, resp.msg)
+				if resp.backoff {
+					c.delegate.OnBackoff(c)
+				} else {
+					c.delegate.OnContinue(c)
+				}
+			}
+
+			err := c.WriteCommand(resp.cmd)
+			if err != nil {
+				c.close()
+				continue
+			}
+
+			if msgsInFlight == 0 &&
+				atomic.LoadInt32(&c.closeFlag) == 1 {
+				c.close()
+				continue
+			}
+		}
+	}
+
+exit:
+	c.wg.Done()
+}
+```
 
 ### 退出
 
