@@ -568,8 +568,50 @@ exit:
 2. 从命令管道接收命令，目前这个管道只有conn的onMessageTouch方法在使用，该方法又由message的公共方法Touch调用，主要用来发送touch命令，即重置消息的超时时间
 3. 从消息处理结果管道接收结果，将结果发送给nsqd服务端，主要用来通知nsqd服务端该消息是消费完成还是需要重新入队
 总结一下writeLoop的内容基本就是将消息处理的结果通过命令的形式发送给nsqd服务端，如重置消息超时时间、消息完成、消息重新入队等。
-关于连接处理这一块我们再来看看一些异常情况下的处理流程，异常处理的代码主要就在上述两个I/O循环中，
+关于连接处理这一块我们再来看看一些异常情况下的处理流程，异常处理的代码主要就在上述两个I/O循环中，可以看到当对网络连接进行读写时发生错误会触发OnIOError函数，该函数再通过delegate将错误通知给上层的producer或consumer，查看producer的delegate可以发现，当OnIOError触发时会调用producer的onConnIOError方法，该方法代码如下：
+```go
+func (w *Producer) onConnIOError(c *Conn, err error)    { w.close() }
+
+func (w *Producer) close() {
+	if !atomic.CompareAndSwapInt32(&w.state, StateConnected, StateDisconnected) {
+		return
+	}
+	w.conn.Close()
+	go func() {
+		// we need to handle this in a goroutine so we don't
+		// block the caller from making progress
+		w.wg.Wait()
+		atomic.StoreInt32(&w.state, StateInit)
+	}()
+}
+```
+可以看到producer的onConnIOError方法只是调用了producer自身的close，close判断当前状态是否是已连接状态，然后将它持有的底层连接关闭，即调用conn.Close，我们继续跟踪conn.Close的具体代码，如下：
+```go
+func (c *Conn) Close() error {
+	atomic.StoreInt32(&c.closeFlag, 1)
+	if c.conn != nil && atomic.LoadInt64(&c.messagesInFlight) == 0 {
+		return c.conn.CloseRead()
+	}
+	return nil
+}
+```
+调用Close方法之后，会将closeFlag置为1，也就是将连接标记为关闭，标记为关闭后我们还有两个I/O循环未退出，即上述的readLoop和writeLoop，我们分别分析一下，首先来看readLoop，分析readLoop代码可以看到在读循环中会判断closeFlag，如果已经标记为关闭时会直接调用goto退出循环，如果此时没有正在处理的消息则直接调用close方法，该方法会关闭底层tcp连接并通知writeLoop也退出；接着我们分析writeLoop，当writeLoop发生写错误时，也会直接调用close方法关闭tcp连接，关于close方法这里不做详细描述，主要还是清理掉正在处理的消息并关闭tcp连接
 
 ### 退出
+生产者的退出通过producer的Stop方法主要是关闭连接，退出router循环，如下：
+```go
+func (w *Producer) Stop() {
+	w.guard.Lock()
+	if !atomic.CompareAndSwapInt32(&w.stopFlag, 0, 1) {
+		w.guard.Unlock()
+		return
+	}
+	w.log(LogLevelInfo, "stopping")
+	close(w.exitChan)
+	w.close()
+	w.guard.Unlock()
+	w.wg.Wait()
+}
+```
 
 ## 消费者的视角
