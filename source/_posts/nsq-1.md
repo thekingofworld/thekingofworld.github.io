@@ -598,7 +598,7 @@ func (c *Conn) Close() error {
 调用Close方法之后，会将closeFlag置为1，也就是将连接标记为关闭，标记为关闭后我们还有两个I/O循环未退出，即上述的readLoop和writeLoop，我们分别分析一下，首先来看readLoop，分析readLoop代码可以看到在读循环中会判断closeFlag，如果已经标记为关闭时会直接调用goto退出循环，如果此时没有正在处理的消息则直接调用close方法，该方法会关闭底层tcp连接并通知writeLoop也退出；接着我们分析writeLoop，当writeLoop发生写错误时，也会直接调用close方法关闭tcp连接，关于close方法这里不做详细描述，主要还是清理掉正在处理的消息并关闭tcp连接
 
 ### 退出
-生产者的退出通过producer的Stop方法主要是关闭连接，退出router循环，如下：
+生产者的退出是通过调用producer的Stop方法来完成的，如下：
 ```go
 func (w *Producer) Stop() {
 	w.guard.Lock()
@@ -613,5 +613,183 @@ func (w *Producer) Stop() {
 	w.wg.Wait()
 }
 ```
+上述流程主要是关闭exitChan管道来通知router循环退出，然后调用close关闭连接，close方法的流程已在上面连接处理中描述过，这里就不进行过多描述了，至此，我们已经分析完了整个生产者的生命周期，主要包括创建实例、发送消息、连接处理、退出等流程，接下来我们换一个角度，看看消费者的处理流程又是怎样的。
 
 ## 消费者的视角
+
+### 实例创建
+
+与消费者相关的代码主要在`consumer.go`文件中，其中`Consumer`结构体即为消费者对象的结构，如下：
+```go
+type Consumer struct {
+	messagesReceived uint64   //收到的消息总数，用于数据统计
+	messagesFinished uint64   //处理成功的消息总数，用于数据统计
+	messagesRequeued uint64   //重新入队的消息总数，用于数据统计
+	totalRdyCount    int64    //当前实际的可处理并发消息数量
+	backoffDuration  int64    //退避的时间，用于流量控制
+	backoffCounter   int32    //退避的次数，用于流量控制
+	maxInFlight      int32    //消费者可处理的最大并发消息数量
+
+	mtx sync.RWMutex
+
+    //日志相关
+	logger   logger
+	logLvl   LogLevel
+	logGuard sync.RWMutex
+
+	behaviorDelegate interface{}  //通过该delegate修改consumer的行为，目前可以用来过滤部分nsqd实例地址
+
+	id      int64   //消费者实例id
+	topic   string  //订阅的topic
+	channel string  //订阅的channel
+	config  Config  //配置项
+
+	rngMtx sync.Mutex
+	rng    *rand.Rand
+
+	needRDYRedistributed int32  //是否需要更新当前每个连接可接收的消息数量
+
+	backoffMtx sync.Mutex
+
+	incomingMessages chan *Message    //接收消息的管道
+
+	rdyRetryMtx    sync.Mutex
+	rdyRetryTimers map[string]*time.Timer  //需要更新rdy，但是触发了maxInFlight的限制，只能开启定时器稍后重试
+
+	pendingConnections map[string]*Conn    //正在与nsqd建立连接的conn
+	connections        map[string]*Conn    //已经与nsqd建立连接的conn
+
+	nsqdTCPAddrs []string  //nsqd实例地址
+	
+	lookupdRecheckChan chan int  //传递重新查询lookupd信号的管道
+	lookupdHTTPAddrs   []string  //nsqlookupd的实例地址
+	lookupdQueryIndex  int       //下一次轮询的nsqlookupd地址
+
+	wg              sync.WaitGroup
+	runningHandlers int32      //当前并发处理器的数量
+	stopFlag        int32      //退出标识
+	connectedFlag   int32      //连接标识
+	stopHandler     sync.Once  //用于通知并发消息处理器退出
+	exitHandler     sync.Once  //用于通知内部lookupLoop和rdyLoop退出循环
+	
+	StopChan chan int  //开发者用来接收消费者退出完成信号的管道
+	exitChan chan int  //内部使用的退出信号管道
+}
+```
+对象中的各个字段含义在上面都进行了注释，接下来我们看下创建消费者实例的方法：`NewConsumer`，该方法同样位于`consumer.go`文件中，如下：
+```go
+func NewConsumer(topic string, channel string, config *Config) (*Consumer, error) {
+	config.assertInitialized()
+
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+
+	if !IsValidTopicName(topic) {
+		return nil, errors.New("invalid topic name")
+	}
+
+	if !IsValidChannelName(channel) {
+		return nil, errors.New("invalid channel name")
+	}
+
+	r := &Consumer{
+		id: atomic.AddInt64(&instCount, 1),
+
+		topic:   topic,
+		channel: channel,
+		config:  *config,
+
+		logger:      log.New(os.Stderr, "", log.Flags()),
+		logLvl:      LogLevelInfo,
+		maxInFlight: int32(config.MaxInFlight),
+
+		incomingMessages: make(chan *Message),
+
+		rdyRetryTimers:     make(map[string]*time.Timer),
+		pendingConnections: make(map[string]*Conn),
+		connections:        make(map[string]*Conn),
+
+		lookupdRecheckChan: make(chan int, 1),
+
+		rng: rand.New(rand.NewSource(time.Now().UnixNano())),
+
+		StopChan: make(chan int),
+		exitChan: make(chan int),
+	}
+	r.wg.Add(1)
+	go r.rdyLoop()
+	return r, nil
+}
+```
+NewConsumer函数流程首先验证配置，然后实例化消费者结构体，最后开启了rdyLoop循环，该循环主要用来调整rdy的数值。
+创建好实例之后，我们需要调用AddHandler或AddConcurrentHandlers来添加消息处理的handler，handler是一个接口类型，如下：
+```go
+type Handler interface {
+	HandleMessage(message *Message) error
+}
+```
+开发者只需要将实现了该接口的对象通过AddHandler或AddConcurrentHandlers添加即可。实例化并添加handler之后，我们需要调用ConnectToNSQLookupds或ConnectToNSQDs来创建连接并接收消息，这里分别介绍一下两种方式的区别：
+1. 当我们通过ConnectToNSQLookupds来连接时，会先通过http的方式查询NSQLookupd实例当前指定topic存在哪些nsqd实例，然后通过ConnectToNSQD分别建立连接，同时启动一个额外的goroutine去定时轮询对应的NSQLookupd实例，这样就实现了动态发现指定topic的nsqd实例，具体可查看lookupdLoop方法的代码，这里不详细描述
+2. 当我们通过ConnectToNSQDs来连接时，也就是采用直连的方式，该方法会实例化底层连接，然后建立与nsqd的tcp连接，发送订阅命令
+在生产环境中推荐使用第一种方式，支持nsqd实例的动态发现
+
+### 消息处理
+接下来我们看看消息处理的过程，上面有提到，我们可以通过AddHandler或AddConcurrentHandlers来添加消息处理器，也就是实现了Handler方法的对象，当然函数也可以，go-nsq提供了HandlerFunc进行包装，我们看看AddHandler和AddConcurrentHandlers的具体内容：
+```go
+func (r *Consumer) AddHandler(handler Handler) {
+	r.AddConcurrentHandlers(handler, 1)
+}
+
+func (r *Consumer) AddConcurrentHandlers(handler Handler, concurrency int) {
+	if atomic.LoadInt32(&r.connectedFlag) == 1 {
+		panic("already connected")
+	}
+
+	atomic.AddInt32(&r.runningHandlers, int32(concurrency))
+	for i := 0; i < concurrency; i++ {
+		go r.handlerLoop(handler)
+	}
+}
+
+func (r *Consumer) handlerLoop(handler Handler) {
+	r.log(LogLevelDebug, "starting Handler")
+
+	for {
+		message, ok := <-r.incomingMessages
+		if !ok {
+			goto exit
+		}
+
+		if r.shouldFailMessage(message, handler) {
+			message.Finish()
+			continue
+		}
+
+		err := handler.HandleMessage(message)
+		if err != nil {
+			r.log(LogLevelError, "Handler returned error (%s) for msg %s", err, message.ID)
+			if !message.IsAutoResponseDisabled() {
+				message.Requeue(-1)
+			}
+			continue
+		}
+
+		if !message.IsAutoResponseDisabled() {
+			message.Finish()
+		}
+	}
+
+exit:
+	r.log(LogLevelDebug, "stopping Handler")
+	if atomic.AddInt32(&r.runningHandlers, -1) == 0 {
+		r.exit()
+	}
+}
+```
+可以看到AddHandler内部也是通过调用AddConcurrentHandlers来添加消息处理器，并发数设置的1，AddConcurrentHandlers则会根据传入的concurrency数量来创建一个或多个goroutine来执行handlerLoop，handlerLoop则是对应的消息处理流程，它负责从incomingMessages管道接收消息，然后调用消息处理器的HandleMessage接口，当HandleMessage返回的error不为空时，则会将消息重新入队，即message.Requeue，否则调用message.Finish来通知nsqd消息已处理完成。
+
+### 流量控制
+因为nsq采用的是push模型，消息由服务端推送给消费者，这个过程中可能出现消费者对于消息处理不过来的情况，那么就需要有一定的流量控制策略，接下来我们就来具体看看消费者如何实现流量控制。
+
+### 退出
