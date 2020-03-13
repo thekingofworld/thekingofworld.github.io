@@ -735,6 +735,7 @@ type Handler interface {
 在生产环境中推荐使用第一种方式，支持nsqd实例的动态发现
 
 ### 消息处理
+
 接下来我们看看消息处理的过程，上面有提到，我们可以通过AddHandler或AddConcurrentHandlers来添加消息处理器，也就是实现了Handler方法的对象，当然函数也可以，go-nsq提供了HandlerFunc进行包装，我们看看AddHandler和AddConcurrentHandlers的具体内容：
 ```go
 func (r *Consumer) AddHandler(handler Handler) {
@@ -790,6 +791,42 @@ exit:
 可以看到AddHandler内部也是通过调用AddConcurrentHandlers来添加消息处理器，并发数设置的1，AddConcurrentHandlers则会根据传入的concurrency数量来创建一个或多个goroutine来执行handlerLoop，handlerLoop则是对应的消息处理流程，它负责从incomingMessages管道接收消息，然后调用消息处理器的HandleMessage接口，当HandleMessage返回的error不为空时，则会将消息重新入队，即message.Requeue，否则调用message.Finish来通知nsqd消息已处理完成。
 
 ### 流量控制
-因为nsq采用的是push模型，消息由服务端推送给消费者，这个过程中可能出现消费者对于消息处理不过来的情况，那么就需要有一定的流量控制策略，接下来我们就来具体看看消费者如何实现流量控制。
+
+因为nsq采用的是push模型，消息由服务端推送给消费者，这个过程中可能出现消费者对于消息处理不过来的情况，那么就需要有一定的流量控制策略，接下来我们就来具体看看消费者如何实现流量控制的：
+1. 首先在NSQ中有一个RDY的概念，本质上就是客户端的一个流量控制，当消费者客户端连接nsqd然后订阅某个topic后，会先发送RDY=0，这意味着不会有消息发送给客户端，当客户端准备好接收消息时会更新RDY的值（比如100），然后发送给nsqd服务端，接着服务端就可以将消息推送给客户端了；
+2. 因为RDY参数是内部实现的概念，对于使用者来说，我们可以通过配置Max-In-Flight选项来限制客户端的最大消费能力。那RDY和Max-In-Flight有什么关系呢？这里有必要说明一下，RDY是消费者客户端与指定nsqd连接的流量控制值，而Max-In-Flight是消费者客户端整体的流量控制值，即`RDY = Max-In-Flight / len(conns)`，conns就是消费者客户端与nsqd的连接，也就是说多个连接会平分Max-In-Flight的配置值，来达到整体流量控制的目的；
+3. 最后需要说明的是，当消息处理失败时，会将消息重新入队`message.Requeue`，此时会触发流量控制，这种场景下的流量控制是通过退避算法实现的，代码中使用backoff来体现，具体内容就是计算退避时间，将各个连接的RDY置为0，表示不再接收消息，等待退避时间完成后，随机选取一个连接将RDY置为1，看是否能够成功处理消息，成功则将各个连接的RDY重新恢复为正常值，失败则继续触发退避，将各连接RDY置为0，这里有一点需要注意，随机选取的连接RDY置为1后，可能没有消息发送过来，这时可能其他连接存在消息可以接收，但RDY却为0，导致无法及时退出整个退避的过程，这个问题是通过rdyLoop解决的，rdyLoop会定时检查各个连接上次发送RDY的时间，如果刚才RDY置为1的连接在一定时间内未接收到消息，则会将此连接RDY置为0，重新随机选取连接。
 
 ### 退出
+
+消费者的退出通过调用consumer.Stop：
+```go
+func (r *Consumer) Stop() {
+	if !atomic.CompareAndSwapInt32(&r.stopFlag, 0, 1) {
+		return
+	}
+
+	r.log(LogLevelInfo, "stopping...")
+
+	if len(r.conns()) == 0 {
+		r.stopHandlers()
+	} else {
+		for _, c := range r.conns() {
+			err := c.WriteCommand(StartClose())
+			if err != nil {
+				r.log(LogLevelError, "(%s) error sending CLS - %s", c.String(), err)
+			}
+		}
+
+		time.AfterFunc(time.Second*30, func() {
+			// if we've waited this long handlers are blocked on processing messages
+			// so we can't just stopHandlers (if any adtl. messages were pending processing
+			// we would cause a panic on channel close)
+			//
+			// instead, we just bypass handler closing and skip to the final exit
+			r.exit()
+		})
+	}
+}
+```
+流程主要是将与各个nsqd实例的连接关闭，然后通过关闭接收消息的incomingMessages管道来通知当前并发的handlerLoop退出，接着关闭exitChan通知rdyLoop和lookupdLoop退出，最后关闭暴露给使用者的StopChan
