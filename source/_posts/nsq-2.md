@@ -390,7 +390,7 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 ```
 这里我将messagePump其他逻辑都屏蔽掉了，想要突出的是if条件判断中的`!client.IsReadyForMessages()`，当消费者客户端进行流量控制时，会将RDY置为0，此时client的IsReadyForMessages则返回false，整个条件判断逻辑也就为true，然后执行if块中的代码，即将memoryMsgChan和backendMsgChan设置为nil，置为nil后代码之后的select逻辑也就无法从消息管道中获取消息，从而达到限制该客户端接收消息的目的
 
-##持久化
+## 持久化
 
 nsq目前有两块持久化数据的逻辑：
 1、当nsqd实例存在topic、channel新建、删除等元数据变化的时候，会进行持久化，具体方法可见nsqd.PersistMetadata
