@@ -7,7 +7,8 @@ title: 李耀的个人博客
 subtitle:
 description:
 keywords:
-author: Leo Li
+author: Jugg Li
+avatar: jugg.jpg
 language:
 timezone:
 
@@ -39,7 +40,7 @@ post_asset_folder: false
 relative_link: false
 future: true
 highlight:
-  enable: true
+  enable: false
   line_number: true
   auto_detect: false
   tab_replace:
@@ -73,7 +74,7 @@ pagination_dir: page
 # Extensions
 ## Plugins: https://hexo.io/plugins/
 ## Themes: https://hexo.io/themes/
-theme: Yelee
+theme: cube
 
 # Deployment
 ## Docs: https://hexo.io/docs/deployment.html
@@ -81,3 +82,6 @@ deploy:
   type: git
   repo: https://github.com/thekingofworld/thekingofworld.github.io.git
   branch: master
+
+# markdown
+markdown: 'commonmark'

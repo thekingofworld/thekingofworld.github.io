@@ -1,0 +1,111 @@
+theme: cube
+
+# background display for mobile, not for pc
+header:
+  background: /images/dota2.jpg
+  # both pc and mobile required title(make it the same as your hexo site _config.yml's title)
+  title: 李小耀耀耀耀耀
+
+
+# background display for pc
+# you can use url or path relative
+# `background: background.png` refers to the path "source/images/background.png"
+background: dota2.jpg
+
+
+# the background image width and height (you can see your image file to get them)
+width: 2000
+height: 1200
+
+
+# this variable is used to locate your background
+# for example, if you want to locate display your background from top
+# you just need to type it: position: 0
+position: 400
+
+
+# this variable is used to make the background header being fuzzy
+# if your do not need the filter blur on the top, make it empty, it means that: `blur: `
+blur: 5
+
+
+# yeah, it is just to make your avatar rounded(true) or not(false)
+avatar: true
+
+menu:
+  # index
+  - title: 首页
+    icon: home
+    url: /
+  # archives
+  - title: 归档
+    icon: archive
+    url: archives
+  # categories
+  - title: 分类
+    icon: categories
+    url: categories
+  # tags
+  - title: 标签
+    icon: tags
+    url: tags
+  # about-me
+  - title: 关于我
+    icon: about
+    url: about
+
+sidebar:
+  links:
+    - title: GitHub
+      url: https://github.com/thekingofworld
+      # icon can be url or path
+      icon: GitHub.png
+  friend_links:
+    - title: x
+      url: x
+      # icon only url
+      #icon: http://cube-1252774894.cosgz.myqcloud.com/friend_links/micblo.png
+
+# only path, refer to source/images
+friend_links: friend_links.jpg
+
+widgets:
+- search
+- author
+- recent_posts
+- categories
+- tagcloud
+- links
+- friend_links
+
+# when you want to use the search, firstly make the `search: true`,
+# then you should install hexo-generator-json-content
+# run `npm install hexo-generator-json-content -save` (in your hexo directory)
+search: true
+
+# before using the comment
+# make use you know how to set the params
+comment:
+  # your disqus_shortname
+  disqus:
+  changyan:
+    appid:
+    conf:
+  youyan:
+  # gitment: https://github.com/imsun/gitment
+  # make sure you know how to set it
+  gitment:
+    owner:
+    repo:
+    oauth:
+      client_id:
+      client_secret:
+
+# some setting about comment module
+comment_setting:
+  changyan:
+    hide_notice: true
+
+analytics:
+  baidu:
+  google:

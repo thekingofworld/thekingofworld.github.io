@@ -14,14 +14,14 @@ tags:
 ### topic、channel
 
 topic和channel是nsq中比较重要的两个概念，topic代表了某种类型的数据流，一个topic通常有1个或多个channel，每个channel都会收到发往这个topic的消息拷贝。同时，一个channel可以注册多个消费者，channel的消息会随机发送给其中一个消费者。如下图：
-![](/img/nsq.gif)
+![](/images/nsq.gif)
 
 ### nsq的消息投递模型和语义
 
 nsq采用的消息投递模型是***push***的方式，即消息会主动推送给消费者，同时通过超时重传和确认机制实现了***最少一次***的消息投递语义
 
 ## 整体架构
-![](/img/nsq-architecture.png)
+![](/images/nsq-architecture.png)
 
 ### 各组件功能
 

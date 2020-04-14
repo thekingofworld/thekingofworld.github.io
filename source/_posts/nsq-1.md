@@ -14,7 +14,7 @@ tags:
 ### 整体设计
 
 先上两个图：
-![](/img/go-nsq.jpg) ![](/img/go-nsq-architecture.png)
+![](/images/go-nsq.jpg) ![](/images/go-nsq-architecture.png)
 上面左图列出了`go-nsq`客户端包中的所有文件，右图是我整理的代码架构设计图，左图中的核心文件基本在右图中都有所体现。从右图可以看出，整体结构大致可以分为两层，上层的话主要对外暴露了两个概念：生产者和消费者；下层主要涉及与nsqd的连接以及协议处理；其中生产者和消费者没有直接的交互，两者只与底层连接进行通信，通过command的形式发送请求，以delegate的形式接收server端的响应，message也就是以这种方式传达给消费者的，同时message也将底层连接绑定为它的delegate，通过这种方式来进行消息的requeue，即重发（消息处理失败时会触发）。
 
 ### 配置项介绍
@@ -402,6 +402,7 @@ func NewConn(addr string, config *Config, delegate ConnDelegate) *Conn {
 }
 ```
 先来看看NewConn调用，前两个参数是地址和配置项，前面已有介绍，我们看下第3个参数：delegate，这里主要使用了委托者模式，由producer实现ConnDelegate中相应的接口，Conn在接收到服务端发送回来的响应时会通过这种委托者的模式调用delegate对应的方法，我们可以看到上面生产者调用NewConn时传递的第3个参数具体内容为`&producerConnDelegate{w}`，这个结构体主要实现了一些生产者所关心的内容：服务端响应、连接错误、心跳等，其他接口都为空实现，如下：
+
 ```go
 type producerConnDelegate struct {
 	w *Producer
@@ -419,7 +420,9 @@ func (d *producerConnDelegate) OnIOError(c *Conn, err error)          { d.w.onCo
 func (d *producerConnDelegate) OnHeartbeat(c *Conn)                   { d.w.onConnHeartbeat(c) }
 func (d *producerConnDelegate) OnClose(c *Conn)                       { d.w.onConnClose(c) }
 ```
+
 接着我们再来看看conn.Connect()的具体实现，如下：
+
 ```go
 func (c *Conn) Connect() (*IdentifyResponse, error) {
 	dialer := &net.Dialer{
@@ -465,12 +468,14 @@ func (c *Conn) Connect() (*IdentifyResponse, error) {
 	return resp, nil
 }
 ```
+
 整个函数主要分为4个流程：
 1. 建立tcp连接
 2. 发送版本号：MagicV2
 3. 调用identify，将客户端的一些配置项传递给服务端，同时根据服务端响应进行一些配置项的设置
 4. 开启I/O循环
 前3步为nsq客户端与服务端建立完整连接的标准流程，没有特别的东西，我们重点关注I/O循环这一块，先来看下readLoop：
+
 ```go
 func (c *Conn) readLoop() {
 	delegate := &connMessageDelegate{c}
@@ -513,11 +518,13 @@ func (c *Conn) readLoop() {
 	}
 }
 ```
+
 readLoop先调用ReadUnpackedResponse根据协议读取服务端发送过来的网络包，该函数具体代码在`protocol.go`文件中，主要是对协议上的处理，这里不做细讲，我们继续看接下来的逻辑，接着判断包的类型是不是心跳包，是的话直接返回响应，无须上层的生产者或消费者处理；接着是一个switch分支，有3个case：
 1. 包类型为FrameTypeResponse时，表示服务端对之前客户端发送命令的响应，比如生产者发送消息的响应
 2. 包类型为FrameTypeMessage时，表示收到消息，主要是消费者的场景会用到
 3. 包类型为FrameTypeError时，表示服务端处理发生错误
 readLoop的内容基本就是处理服务端心跳包、发回的消息、响应和错误，并调用委托者delegate通知上层的生产者或消费者，接下来我们再来分析writeLoop的源码：
+
 ```go
 func (c *Conn) writeLoop() {
 	for {
@@ -563,12 +570,14 @@ exit:
 	c.wg.Done()
 }
 ```
+
 可以看到，writeLoop通过for循环加select处理三种场景：
 1. 接收退出信号，清理未处理的消息
 2. 从命令管道接收命令，目前这个管道只有conn的onMessageTouch方法在使用，该方法又由message的公共方法Touch调用，主要用来发送touch命令，即重置消息的超时时间
 3. 从消息处理结果管道接收结果，将结果发送给nsqd服务端，主要用来通知nsqd服务端该消息是消费完成还是需要重新入队
 总结一下writeLoop的内容基本就是将消息处理的结果通过命令的形式发送给nsqd服务端，如重置消息超时时间、消息完成、消息重新入队等。
 关于连接处理这一块我们再来看看一些异常情况下的处理流程，异常处理的代码主要就在上述两个I/O循环中，可以看到当对网络连接进行读写时发生错误会触发OnIOError函数，该函数再通过delegate将错误通知给上层的producer或consumer，查看producer的delegate可以发现，当OnIOError触发时会调用producer的onConnIOError方法，该方法代码如下：
+
 ```go
 func (w *Producer) onConnIOError(c *Conn, err error)    { w.close() }
 
@@ -585,7 +594,9 @@ func (w *Producer) close() {
 	}()
 }
 ```
+
 可以看到producer的onConnIOError方法只是调用了producer自身的close，close判断当前状态是否是已连接状态，然后将它持有的底层连接关闭，即调用conn.Close，我们继续跟踪conn.Close的具体代码，如下：
+
 ```go
 func (c *Conn) Close() error {
 	atomic.StoreInt32(&c.closeFlag, 1)
@@ -595,10 +606,12 @@ func (c *Conn) Close() error {
 	return nil
 }
 ```
+
 调用Close方法之后，会将closeFlag置为1，也就是将连接标记为关闭，标记为关闭后我们还有两个I/O循环未退出，即上述的readLoop和writeLoop，我们分别分析一下，首先来看readLoop，分析readLoop代码可以看到在读循环中会判断closeFlag，如果已经标记为关闭时会直接调用goto退出循环，如果此时没有正在处理的消息则直接调用close方法，该方法会关闭底层tcp连接并通知writeLoop也退出；接着我们分析writeLoop，当writeLoop发生写错误时，也会直接调用close方法关闭tcp连接，关于close方法这里不做详细描述，主要还是清理掉正在处理的消息并关闭tcp连接
 
 ### 退出
 生产者的退出是通过调用producer的Stop方法来完成的，如下：
+
 ```go
 func (w *Producer) Stop() {
 	w.guard.Lock()
@@ -613,6 +626,7 @@ func (w *Producer) Stop() {
 	w.wg.Wait()
 }
 ```
+
 上述流程主要是关闭exitChan管道来通知router循环退出，然后调用close关闭连接，close方法的流程已在上面连接处理中描述过，这里就不进行过多描述了，至此，我们已经分析完了整个生产者的生命周期，主要包括创建实例、发送消息、连接处理、退出等流程，接下来我们换一个角度，看看消费者的处理流程又是怎样的。
 
 ## 消费者的视角
@@ -620,6 +634,7 @@ func (w *Producer) Stop() {
 ### 实例创建
 
 与消费者相关的代码主要在`consumer.go`文件中，其中`Consumer`结构体即为消费者对象的结构，如下：
+
 ```go
 type Consumer struct {
 	messagesReceived uint64   //收到的消息总数，用于数据统计
@@ -676,7 +691,9 @@ type Consumer struct {
 	exitChan chan int  //内部使用的退出信号管道
 }
 ```
+
 对象中的各个字段含义在上面都进行了注释，接下来我们看下创建消费者实例的方法：`NewConsumer`，该方法同样位于`consumer.go`文件中，如下：
+
 ```go
 func NewConsumer(topic string, channel string, config *Config) (*Consumer, error) {
 	config.assertInitialized()
@@ -722,13 +739,16 @@ func NewConsumer(topic string, channel string, config *Config) (*Consumer, error
 	return r, nil
 }
 ```
+
 NewConsumer函数流程首先验证配置，然后实例化消费者结构体，最后开启了rdyLoop循环，该循环主要用来调整rdy的数值。
 创建好实例之后，我们需要调用AddHandler或AddConcurrentHandlers来添加消息处理的handler，handler是一个接口类型，如下：
+
 ```go
 type Handler interface {
 	HandleMessage(message *Message) error
 }
 ```
+
 开发者只需要将实现了该接口的对象通过AddHandler或AddConcurrentHandlers添加即可。实例化并添加handler之后，我们需要调用ConnectToNSQLookupds或ConnectToNSQDs来创建连接并接收消息，这里分别介绍一下两种方式的区别：
 1. 当我们通过ConnectToNSQLookupds来连接时，会先通过http的方式查询NSQLookupd实例当前指定topic存在哪些nsqd实例，然后通过ConnectToNSQD分别建立连接，同时启动一个额外的goroutine去定时轮询对应的NSQLookupd实例，这样就实现了动态发现指定topic的nsqd实例，具体可查看lookupdLoop方法的代码，这里不详细描述
 2. 当我们通过ConnectToNSQDs来连接时，也就是采用直连的方式，该方法会实例化底层连接，然后建立与nsqd的tcp连接，发送订阅命令
@@ -737,6 +757,7 @@ type Handler interface {
 ### 消息处理
 
 接下来我们看看消息处理的过程，上面有提到，我们可以通过AddHandler或AddConcurrentHandlers来添加消息处理器，也就是实现了Handler方法的对象，当然函数也可以，go-nsq提供了HandlerFunc进行包装，我们看看AddHandler和AddConcurrentHandlers的具体内容：
+
 ```go
 func (r *Consumer) AddHandler(handler Handler) {
 	r.AddConcurrentHandlers(handler, 1)
@@ -788,6 +809,7 @@ exit:
 	}
 }
 ```
+
 可以看到AddHandler内部也是通过调用AddConcurrentHandlers来添加消息处理器，并发数设置的1，AddConcurrentHandlers则会根据传入的concurrency数量来创建一个或多个goroutine来执行handlerLoop，handlerLoop则是对应的消息处理流程，它负责从incomingMessages管道接收消息，然后调用消息处理器的HandleMessage接口，当HandleMessage返回的error不为空时，则会将消息重新入队，即message.Requeue，否则调用message.Finish来通知nsqd消息已处理完成。
 
 ### 流量控制
@@ -800,6 +822,7 @@ exit:
 ### 退出
 
 消费者的退出通过调用consumer.Stop：
+
 ```go
 func (r *Consumer) Stop() {
 	if !atomic.CompareAndSwapInt32(&r.stopFlag, 0, 1) {
@@ -829,4 +852,5 @@ func (r *Consumer) Stop() {
 	}
 }
 ```
+
 流程主要是将与各个nsqd实例的连接关闭，然后通过关闭接收消息的incomingMessages管道来通知当前并发的handlerLoop退出，接着关闭exitChan通知rdyLoop和lookupdLoop退出，最后关闭暴露给使用者的StopChan
