@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html>
+<head><meta name="generator" content="Hexo 3.8.0">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+    <meta name="author" content="Jugg Li">
+    
+    
+    
+    
+    
+    
+    <title>消息队列NSQ源码分析（四）：nsqlookupd | 李耀的个人博客</title>
+    <!-- inject:style -->
+    <link href="/css/style.css" rel="stylesheet" type="text/css">
+    <!-- endinject -->
+    <style>
+        .cube-loading {
+            top: 0;
+            position: fixed;
+            width: 100%;
+            height: 100%;
+            background: url('/images/lg/loading.gif') no-repeat center center;
+            background-color: rgba(0,0,0,.7);
+        }
+
+        .cube-loading.out {
+            display: none;
+        }
+
+        .cube-loading:before {
+            display: block;
+            content: 'Loading';
+            position: relative;
+            width: 100%;
+            top: 50%;
+            right: -50%;
+            color: #fff;
+        }
+
+        @media(max-width: 768px) {
+            .cube-loading:before {
+                font-size: 1.2em;
+                transform: translate(-24px,20px);
+                -webkit-transform: translate(-24px,20px);
+                -o-transform: translate(-24px,20px);
+                -ms-transform: translate(-24px,20px);
+            }
+        }
+
+        @media(min-width: 768px) {
+            .cube-loading:before {
+
+            }
+        }
+    </style>
+    
+
+    <link rel="stylesheet" href="/css/prettify.css">
+<link rel="stylesheet" href="/css/tomorrow-night.min.css">
+</head></html>
+<body>
+<div class="cube-body">
+    <nav id="cube-top-memu" class="cube-menu">
+    <ul class="cube-menu-collapse">
+        
+        <li>
+            <i class="cube-icon cube-icon-home" aria-hidden="true"></i>
+            <a href="/">首页</a>
+        </li>
+        
+        <li>
+            <i class="cube-icon cube-icon-archive" aria-hidden="true"></i>
+            <a href="/archives">归档</a>
+        </li>
+        
+        <li>
+            <i class="cube-icon cube-icon-categories" aria-hidden="true"></i>
+            <a href="/categories">分类</a>
+        </li>
+        
+        <li>
+            <i class="cube-icon cube-icon-tags" aria-hidden="true"></i>
+            <a href="/tags">标签</a>
+        </li>
+        
+        <li>
+            <i class="cube-icon cube-icon-about" aria-hidden="true"></i>
+            <a href="/about">关于我</a>
+        </li>
+        
+    </ul>
+</nav>
+<nav class="cube-side-menu" id="cube-side-menu">
+    <ul class="cube-menu-list">
+        <li>
+            <a class="scroll-to-top">Top</a>
+        </li>
+    </ul>
+</nav>
+    <header class="cube-header" id="cube-header">
+    <img src=" /images/dota2.jpg " alt="头部背景图片">
+    
+    <div class="cube-type">
+        <span class="cube-typed-title">李小耀耀耀耀耀</span>
+        <span class="cube-typed-cursor">|</span>
+    </div>
+    
+</header>
+
+    <style>
+        nav.cube-menu:before {
+            content: '';
+            visibility: hidden;
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 44px;
+        
+            filter: blur(5px);
+            -webkit-filter: blur(5px);
+        
+            z-index: -1;
+            background-image: url('/images/dota2.jpg');
+            background-repeat: no-repeat;
+            background-position: center -356px;
+            background-size: cover;
+            background-color: transparent;
+        }
+
+        header.cube-background.cube-header-background {
+            visibility: hidden;
+            background-image: url('/images/dota2.jpg');
+            background-position: center -400px;
+        }
+    </style>
+    <header class="cube-background cube-header-background">
+        
+        <div class="cube-type">
+            <span class="cube-typed-title">李小耀耀耀耀耀</span>
+            <span class="cube-typed-cursor">|</span>
+        </div>
+        
+    </header>
+    <div class="load-header-background"></div>
+    <script>
+        (function (window) {
+
+            window.headerModule = {}
+            window.headerModule.image = {
+                width: '2000',
+                height: '1200'
+            }
+
+        })(window)
+    </script>
+    
+    <div class="cube-content">
+        <div class="cube-left">
+            <div class="cube-article">
+    <h1 class="title">消息队列NSQ源码分析（四）：nsqlookupd</h1>
+    
+    <div class="cube-article-header">
+        <div class="cube-article-date">
+            <i class="cube-icon cube-icon-date" aria-hidden="true"></i>
+            <!-- moment.js对象 -->
+            2020-04-14
+        </div>
+        <div class="cube-article-tags">
+    <i class="cube-icon cube-icon-tag" aria-hidden="true"></i>
+    
+    <a href="/tags/nsq/">#nsq</a>
+    
+</div>
+    </div>
+    
+    <div class="cube-article-content cube-markdown">
+        
+        <p>本篇为NSQ源码分析的第四篇，主要分析nsq服务端发现机制的源码，即nsqlookupd</p>
+<a id="more"></a>
+<h2 id="概述">概述</h2>
+<p>nsqlookupd主要用来管理生产者实例（即nsqd）的注册与发现。nsqd实例启动时可以指定nsqlookupd实例地址，启动后会以一定时间间隔上报实例信息到nsqlookupd。消费者客户端通过查询nsqlookupd即可实现动态发现当前生产指定topic的nsqd实例。下面我们将从启动过程、生产者注册、生产者发现等3个模块来讲述nsqlookupd的具体实现。</p>
+<h2 id="启动过程">启动过程</h2>
+<p>我们从<code>apps/nsqlookupd/main.go</code>开始，可以看到其代码结构与之前的nsqd类似，使用了program包装，同时实现了Init、Start、Stop等方法，具体看下Start方法的执行过程：</p>
+<pre><code class="language-go">func (p *program) Start() error {
+	opts := nsqlookupd.NewOptions()
+
+	flagSet := nsqlookupdFlagSet(opts)
+	flagSet.Parse(os.Args[1:])
+
+	var cfg map[string]interface{}
+	configFile := flagSet.Lookup(&quot;config&quot;).Value.String()
+	if configFile != &quot;&quot; {
+		_, err := toml.DecodeFile(configFile, &amp;cfg)
+		if err != nil {
+			logFatal(&quot;failed to load config file %s - %s&quot;, configFile, err)
+		}
+	}
+
+	options.Resolve(opts, flagSet, cfg)
+	nsqlookupd, err := nsqlookupd.New(opts)
+	if err != nil {
+		logFatal(&quot;failed to instantiate nsqlookupd&quot;, err)
+	}
+	p.nsqlookupd = nsqlookupd
+
+	go func() {
+		err := p.nsqlookupd.Main()
+		if err != nil {
+			p.Stop()
+			os.Exit(1)
+		}
+	}()
+
+	return nil
+}
+</code></pre>
+<p>大致流程仍然与nsqd类似：解析启动参数，创建nsqlookupd实例、执行nsqlookupd实例的Main函数，接着我们看下nsqlookupd.New与nsqlookupd.Main两个函数：</p>
+<pre><code class="language-go">func New(opts *Options) (*NSQLookupd, error) {
+	var err error
+
+	if opts.Logger == nil {
+		opts.Logger = log.New(os.Stderr, opts.LogPrefix, log.Ldate|log.Ltime|log.Lmicroseconds)
+	}
+	l := &amp;NSQLookupd{
+		opts: opts,
+		DB:   NewRegistrationDB(),
+	}
+
+	l.logf(LOG_INFO, version.String(&quot;nsqlookupd&quot;))
+
+	l.tcpListener, err = net.Listen(&quot;tcp&quot;, opts.TCPAddress)
+	if err != nil {
+		return nil, fmt.Errorf(&quot;listen (%s) failed - %s&quot;, opts.TCPAddress, err)
+	}
+	l.httpListener, err = net.Listen(&quot;tcp&quot;, opts.HTTPAddress)
+	if err != nil {
+		return nil, fmt.Errorf(&quot;listen (%s) failed - %s&quot;, opts.TCPAddress, err)
+	}
+
+	return l, nil
+}
+</code></pre>
+<p>nsqlookupd.New用来根据启动参数创建nsqd实例，同时开启tcp、http两个端口监听，接着我们看下nsqlookupd.Main的内容：</p>
+<pre><code class="language-go">func (l *NSQLookupd) Main() error {
+	ctx := &amp;Context{l}
+
+	exitCh := make(chan error)
+	var once sync.Once
+	exitFunc := func(err error) {
+		once.Do(func() {
+			if err != nil {
+				l.logf(LOG_FATAL, &quot;%s&quot;, err)
+			}
+			exitCh &lt;- err
+		})
+	}
+
+	tcpServer := &amp;tcpServer{ctx: ctx}
+	l.waitGroup.Wrap(func() {
+		exitFunc(protocol.TCPServer(l.tcpListener, tcpServer, l.logf))
+	})
+	httpServer := newHTTPServer(ctx)
+	l.waitGroup.Wrap(func() {
+		exitFunc(http_api.Serve(l.httpListener, httpServer, &quot;HTTP&quot;, l.logf))
+	})
+
+	err := &lt;-exitCh
+	return err
+}
+</code></pre>
+<p>通过上述代码可以看出，nsqlookupd.Main主要包含逻辑有：<br>
+1、开启单独协程对tcp连接进行处理<br>
+2、开启单独协程对http连接进行处理</p>
+<h2 id="生产者注册">生产者注册</h2>
+<p>生产者实例信息注册通过tcp连接通信来完成，关于连接处理、通信这一块大致的流程与nsqd类似，主要就是接受nsqd发送过来的信息，这些信息主要包括topic、channel、nsqd实例地址、tcp端口号、http端口号等，然后nsqlookupd会将这些信息放置在内存中的一个RegistrationDB结构中并维护，具体实现代码在<code>nsqlookupd/lookup_protocol_v1.go</code>与<code>registration_db.go</code>中，因整个过程实现较为简单，有兴趣的同学可以直接查看源码，这里就不再详细描述了。</p>
+<h2 id="生产者发现">生产者发现</h2>
+<p>生产者的发现则是通过http接口查询上述RegistrationDB结构中的信息来实现，消费者客户端会定时轮询该http接口以支持动态发现生产指定topic的nsqd实例，具体实现代码可查看<code>nsqlookupd/http.go</code>。</p>
+
+    </div>
+</div>
+
+<div class="cube-article-nav">
+    <ul>
+        
+        
+        <li class="next">
+            <a href="/2020/04/14/nsq-2/">
+                消息队列NSQ源码分析（三）：nsqd
+                <i class="cube-icon cube-next" aria-hidden="true"></i>
+            </a>
+        </li>
+        
+    </ul>
+</div>
+
+
+<!-- TODO 根据theme.comment的内容进行入口选择 -->
+
+
+
+        </div>
+        <div class="cube-right">
+            
+
+<div class="cube-search cube-sidebar" id="cube-search">
+    <div class="search-container">
+        <input type="text" placeholder="Search" class="cube-search-input" id="cube-search-input">
+        <i class="cube-icon cube-icon-search cube-search-submit" aria-hidden="true"></i>
+    </div>
+    <!-- TODO 通过给window赋一个全局变量，通过脚本赋值 -->
+</div>
+<script>
+    (function (window) {
+        'use strict';
+        window.searchModule = {}
+        window.searchModule.JSONUrl = '/content.json'
+        window.searchModule.rootUrl = '/'
+    })(window)
+</script>
+<div class="cube-search-form">
+    <div class="cube-search-control">
+        <input type="text" placeholder="Search" class="search-input">
+        <a class="close-button">
+            <i class="cube-icon cube-close" aria-hidden="true"></i>
+        </a>
+    </div>
+    <div class="cube-search-result"></div>
+</div>
+
+
+<div class="cube-author cube-sidebar" id="cube-author">
+    
+    
+    <style>
+        @media(min-width: 768px) {
+            .cube-author img {
+                margin-top: 40px;
+                margin-bottom: 10px;
+            }
+        }
+        @media(max-width: 1120px) and (min-width: 768px) {
+            .cube-author img {
+                width: 128px;
+                height: 128px;
+            }
+        }
+        @media(min-width: 1120px) {
+            .cube-author img {
+                width: 160px;
+                height: 160px;
+            }
+        }
+    </style>
+    
+    <img src="/images/jugg.jpg" alt="avatar" class="cube-avatar">
+    
+    
+    <span>Jugg Li</span>
+    
+    
+    <div class="count">
+        <a class="count articles"><span>4</span>Article</a>
+        <a class="count tags"><span>1</span>Tags</a>
+        <a class="count categories"><span>1</span>Categories</a>
+    </div>
+</div>
+
+
+
+<div class="cube-recent-posts cube-sidebar" id="cube-recent-posts">
+    <div class="title">
+        <a>Recent Posts</a>
+    </div>
+    <ul class="list">
+        
+        
+        <li>
+            <!-- TODO 如果文章要显示图片，那么在front-matter上添加preview属性(url or path) -->
+            
+            <div class="normal">
+                <p class="index first">
+                    <span>1</span>
+                </p>
+                <p class="title">
+                    <a href="/2020/04/14/nsq-3/" title="消息队列NSQ源码分析（四）：nsqlookupd">消息队列NSQ源码分析（四）：nsqlookupd</a>
+                </p>
+            </div>
+            
+        </li>
+        
+        
+        
+        <li>
+            <div class="normal">
+                <p class="index">
+                    <span>2</span>
+                </p>
+                <p class="title">
+                    <a href="/2020/04/14/nsq-2/" title="消息队列NSQ源码分析（三）：nsqd">消息队列NSQ源码分析（三）：nsqd</a>
+                </p>
+            </div>
+        </li>
+        
+        
+        
+        <li>
+            <div class="normal">
+                <p class="index">
+                    <span>3</span>
+                </p>
+                <p class="title">
+                    <a href="/2020/04/14/nsq-1/" title="消息队列NSQ源码分析（二）：go-nsq">消息队列NSQ源码分析（二）：go-nsq</a>
+                </p>
+            </div>
+        </li>
+        
+        
+        
+        <li>
+            <div class="normal">
+                <p class="index">
+                    <span>4</span>
+                </p>
+                <p class="title">
+                    <a href="/2020/04/14/nsq-0/" title="消息队列NSQ源码分析（一）：概述">消息队列NSQ源码分析（一）：概述</a>
+                </p>
+            </div>
+        </li>
+        
+        
+    </ul>
+</div>
+
+
+
+<div class="cube-categories cube-sidebar" id="cube-categories">
+    <div class="title">
+        <a href="/categories">Categories</a>
+    </div>
+    <div class="cube-boxs">
+        
+        
+        <div class="cube-box ">
+            <a href="/categories/消息队列/">#消息队列</a>
+        </div>
+        
+    </div>
+</div>
+
+
+
+<div class="cube-tagcloud cube-sidebar" id="cube-tagcloud">
+    <div class="title">
+        <a href="/tags">Tagcloud</a>
+    </div>
+    <div class="cube-boxs">
+        
+        
+        <div class="cube-box-bg ">
+            <a href="/tags/nsq/">#nsq</a>
+        </div>
+        
+    </div>
+</div>
+
+
+
+<div class="cube-links cube-sidebar" id="cube-links">
+    <div class="title">
+        <a>Links</a>
+    </div>
+    <ul class="list">
+        
+        <li>
+            
+            
+            <img src="/images/GitHub.png">
+            
+            <a href="https://github.com/thekingofworld" target="_blank">GitHub</a>
+        </li>
+        
+    </ul>
+</div>
+
+
+
+<div class="cube-friend-links cube-sidebar" id="cube-friend-links">
+    <div class="title">
+        <a>Friend Links</a>
+    </div>
+    <ul class="list">
+        
+        <li>
+            <!-- TODO change avatar.png to friend.png-->
+            <img src="/images/friend_links.jpg ">
+            <a href="x" target="_blank">x</a>
+        </li>
+        
+    </ul>
+</div>
+
+
+        </div>
+    </div>
+</div>
+<footer class="cube-footer">
+    
+© 2020 Jugg Li
+
+<br>
+Powered by <a href="https://hexo.io/" target="_blank">Hexo</a>.&nbsp;Theme by <a href="https://github.com/ZEROKISEKI" target="_blank">AONOSORA</a>
+</footer>
+<!-- inject:script -->
+<script src="/js/script.js"></script>
+<!-- endinject -->
+<div class="cube-loading out"></div>
+</body>
+</html>

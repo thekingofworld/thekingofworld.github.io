@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html>
+<head><meta name="generator" content="Hexo 3.8.0">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+    <meta name="author" content="Jugg Li">
+    
+    
+    
+    
+    
+    
+    <title>消息队列NSQ源码分析（三）：nsqd | 李耀的个人博客</title>
+    <!-- inject:style -->
+    <link href="/css/style.css" rel="stylesheet" type="text/css">
+    <!-- endinject -->
+    <style>
+        .cube-loading {
+            top: 0;
+            position: fixed;
+            width: 100%;
+            height: 100%;
+            background: url('/images/lg/loading.gif') no-repeat center center;
+            background-color: rgba(0,0,0,.7);
+        }
+
+        .cube-loading.out {
+            display: none;
+        }
+
+        .cube-loading:before {
+            display: block;
+            content: 'Loading';
+            position: relative;
+            width: 100%;
+            top: 50%;
+            right: -50%;
+            color: #fff;
+        }
+
+        @media(max-width: 768px) {
+            .cube-loading:before {
+                font-size: 1.2em;
+                transform: translate(-24px,20px);
+                -webkit-transform: translate(-24px,20px);
+                -o-transform: translate(-24px,20px);
+                -ms-transform: translate(-24px,20px);
+            }
+        }
+
+        @media(min-width: 768px) {
+            .cube-loading:before {
+
+            }
+        }
+    </style>
+    
+
+    <link rel="stylesheet" href="/css/prettify.css">
+<link rel="stylesheet" href="/css/tomorrow-night.min.css">
+</head></html>
+<body>
+<div class="cube-body">
+    <nav id="cube-top-memu" class="cube-menu">
+    <ul class="cube-menu-collapse">
+        
+        <li>
+            <i class="cube-icon cube-icon-home" aria-hidden="true"></i>
+            <a href="/">首页</a>
+        </li>
+        
+        <li>
+            <i class="cube-icon cube-icon-archive" aria-hidden="true"></i>
+            <a href="/archives">归档</a>
+        </li>
+        
+        <li>
+            <i class="cube-icon cube-icon-categories" aria-hidden="true"></i>
+            <a href="/categories">分类</a>
+        </li>
+        
+        <li>
+            <i class="cube-icon cube-icon-tags" aria-hidden="true"></i>
+            <a href="/tags">标签</a>
+        </li>
+        
+        <li>
+            <i class="cube-icon cube-icon-about" aria-hidden="true"></i>
+            <a href="/about">关于我</a>
+        </li>
+        
+    </ul>
+</nav>
+<nav class="cube-side-menu" id="cube-side-menu">
+    <ul class="cube-menu-list">
+        <li>
+            <a class="scroll-to-top">Top</a>
+        </li>
+    </ul>
+</nav>
+    <header class="cube-header" id="cube-header">
+    <img src=" /images/dota2.jpg " alt="头部背景图片">
+    
+    <div class="cube-type">
+        <span class="cube-typed-title">李小耀耀耀耀耀</span>
+        <span class="cube-typed-cursor">|</span>
+    </div>
+    
+</header>
+
+    <style>
+        nav.cube-menu:before {
+            content: '';
+            visibility: hidden;
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 44px;
+        
+            filter: blur(5px);
+            -webkit-filter: blur(5px);
+        
+            z-index: -1;
+            background-image: url('/images/dota2.jpg');
+            background-repeat: no-repeat;
+            background-position: center -356px;
+            background-size: cover;
+            background-color: transparent;
+        }
+
+        header.cube-background.cube-header-background {
+            visibility: hidden;
+            background-image: url('/images/dota2.jpg');
+            background-position: center -400px;
+        }
+    </style>
+    <header class="cube-background cube-header-background">
+        
+        <div class="cube-type">
+            <span class="cube-typed-title">李小耀耀耀耀耀</span>
+            <span class="cube-typed-cursor">|</span>
+        </div>
+        
+    </header>
+    <div class="load-header-background"></div>
+    <script>
+        (function (window) {
+
+            window.headerModule = {}
+            window.headerModule.image = {
+                width: '2000',
+                height: '1200'
+            }
+
+        })(window)
+    </script>
+    
+    <div class="cube-content">
+        <div class="cube-left">
+            <div class="cube-article">
+    <h1 class="title">消息队列NSQ源码分析（三）：nsqd</h1>
+    
+    <div class="cube-article-header">
+        <div class="cube-article-date">
+            <i class="cube-icon cube-icon-date" aria-hidden="true"></i>
+            <!-- moment.js对象 -->
+            2020-04-14
+        </div>
+        <div class="cube-article-tags">
+    <i class="cube-icon cube-icon-tag" aria-hidden="true"></i>
+    
+    <a href="/tags/nsq/">#nsq</a>
+    
+</div>
+    </div>
+    
+    <div class="cube-article-content cube-markdown">
+        
+        <p>本篇为NSQ源码分析的第三篇，主要分析nsq的服务端源码，即nsqd</p>
+<a id="more"></a>
+<h2 id="启动过程">启动过程</h2>
+<p>首先看一下nsqd的启动过程，我们从<code>apps/nsqd/main.go</code>开始，可以看到在main包中声明了<code>program</code>结构体，该结构体包装了nsqd实例，提供了Init、Start、Stop方法。接着我们看main函数，主要逻辑就是创建program结构体，然后调用<code>github.com/judwhite/go-svc</code>这个库提供的svc.Run方法，该方法底层实现则是调用program的Init、Start方法，引入这个库主要是为了提供创建可在其自身的 Windows 会话中长时间运行的可执行应用程序的支持。现在我们重点看下program的Start方法，简化后的逻辑如下：</p>
+<pre><code class="language-go">func (p *program) Start() error {
+	opts := nsqd.NewOptions()
+	flagSet := nsqdFlagSet(opts)
+	flagSet.Parse(os.Args[1:])
+	options.Resolve(opts, flagSet, cfg)
+	nsqd, err := nsqd.New(opts)
+	if err != nil {
+		logFatal(&quot;failed to instantiate nsqd - %s&quot;, err)
+	}
+	p.nsqd = nsqd
+
+	err = p.nsqd.LoadMetadata()
+	if err != nil {
+		logFatal(&quot;failed to load metadata - %s&quot;, err)
+	}
+	err = p.nsqd.PersistMetadata()
+	if err != nil {
+		logFatal(&quot;failed to persist metadata - %s&quot;, err)
+	}
+
+	go func() {
+		err := p.nsqd.Main()
+		if err != nil {
+			p.Stop()
+			os.Exit(1)
+		}
+	}()
+
+	return nil
+}
+</code></pre>
+<p>大致流程即为解析启动参数、创建nsqd实例、加载之前持久化的元数据（topic、channel等）、执行nsqd实例的main函数，接着我们看下nsqd.New与nsqd.Main两个函数：</p>
+<pre><code class="language-go">func New(opts *Options) (*NSQD, error) {
+	var err error
+	n := &amp;NSQD{
+		startTime:            time.Now(),
+		topicMap:             make(map[string]*Topic),
+		clients:              make(map[int64]Client),
+		exitChan:             make(chan int),
+		notifyChan:           make(chan interface{}),
+		optsNotificationChan: make(chan struct{}, 1),
+		dl:                   dirlock.New(dataPath),
+	}
+	httpcli := http_api.NewClient(nil, opts.HTTPClientConnectTimeout, opts.HTTPClientRequestTimeout)
+	n.ci = clusterinfo.New(n.logf, httpcli)
+
+	n.lookupPeers.Store([]*lookupPeer{})
+
+	n.swapOpts(opts)
+	n.errValue.Store(errStore{})
+
+	err = n.dl.Lock()
+	if err != nil {
+		return nil, fmt.Errorf(&quot;--data-path=%s in use (possibly by another instance of nsqd)&quot;, dataPath)
+	}
+	
+	n.tcpListener, err = net.Listen(&quot;tcp&quot;, opts.TCPAddress)
+	if err != nil {
+		return nil, fmt.Errorf(&quot;listen (%s) failed - %s&quot;, opts.TCPAddress, err)
+	}
+	n.httpListener, err = net.Listen(&quot;tcp&quot;, opts.HTTPAddress)
+	if err != nil {
+		return nil, fmt.Errorf(&quot;listen (%s) failed - %s&quot;, opts.HTTPAddress, err)
+	}
+	if n.tlsConfig != nil &amp;&amp; opts.HTTPSAddress != &quot;&quot; {
+		n.httpsListener, err = tls.Listen(&quot;tcp&quot;, opts.HTTPSAddress, n.tlsConfig)
+		if err != nil {
+			return nil, fmt.Errorf(&quot;listen (%s) failed - %s&quot;, opts.HTTPSAddress, err)
+		}
+	}
+
+	return n, nil
+}
+</code></pre>
+<p>nsqd.New用来根据启动参数创建nsqd实例，同时开启tcp、http两个端口监听，接着我们看下nsqd.Main的内容：</p>
+<pre><code class="language-go">func (n *NSQD) Main() error {
+	ctx := &amp;context{n}
+
+	exitCh := make(chan error)
+	var once sync.Once
+	exitFunc := func(err error) {
+		once.Do(func() {
+			if err != nil {
+				n.logf(LOG_FATAL, &quot;%s&quot;, err)
+			}
+			exitCh &lt;- err
+		})
+	}
+
+	tcpServer := &amp;tcpServer{ctx: ctx}
+	n.waitGroup.Wrap(func() {
+		exitFunc(protocol.TCPServer(n.tcpListener, tcpServer, n.logf))
+	})
+	httpServer := newHTTPServer(ctx, false, n.getOpts().TLSRequired == TLSRequired)
+	n.waitGroup.Wrap(func() {
+		exitFunc(http_api.Serve(n.httpListener, httpServer, &quot;HTTP&quot;, n.logf))
+	})
+	if n.tlsConfig != nil &amp;&amp; n.getOpts().HTTPSAddress != &quot;&quot; {
+		httpsServer := newHTTPServer(ctx, true, true)
+		n.waitGroup.Wrap(func() {
+			exitFunc(http_api.Serve(n.httpsListener, httpsServer, &quot;HTTPS&quot;, n.logf))
+		})
+	}
+
+	n.waitGroup.Wrap(n.queueScanLoop)
+	n.waitGroup.Wrap(n.lookupLoop)
+	if n.getOpts().StatsdAddress != &quot;&quot; {
+		n.waitGroup.Wrap(n.statsdLoop)
+	}
+
+	err := &lt;-exitCh
+	return err
+}
+</code></pre>
+<p>通过上述代码可以看出，nsqd.Main主要包含逻辑有：<br>
+1、开启单独协程对tcp连接进行处理<br>
+2、开启单独协程对http连接进行处理<br>
+3、如果存在https设置，则开启单独协程处理https请求<br>
+4、开启单独协程执行queueScanLoop，主要用来处理延迟消息以及超时消息，文章后面讲投递消息时会详细描述<br>
+5、开启单独协程执行lookupLoop，主要用来与nsqlookupd通信，保持心跳、上报数据等<br>
+6、如果配置了StatsdAddress，则开启单独协程执行statsdLoop，主要用来上报内存分配、gc、topic和channel等数据</p>
+<h2 id="客户端连接处理、通信协议">客户端连接处理、通信协议</h2>
+<p>现在我们来了解一下nsqd实例处理客户端连接的具体过程，上面Main中的代码可以看到，nsqd在tcp连接处理这一块采用的还是go语言中常规的网络模型，即调用accept接收连接，单独开启协程处理该连接，我们从tcp.go中的Handle方法开始，看看连接的具体处理过程：</p>
+<pre><code class="language-go">func (p *tcpServer) Handle(clientConn net.Conn) {
+	buf := make([]byte, 4)
+	_, err := io.ReadFull(clientConn, buf)
+	if err != nil {
+		p.ctx.nsqd.logf(LOG_ERROR, &quot;failed to read protocol version - %s&quot;, err)
+		clientConn.Close()
+		return
+	}
+	protocolMagic := string(buf)
+
+	p.ctx.nsqd.logf(LOG_INFO, &quot;CLIENT(%s): desired protocol magic '%s'&quot;,
+		clientConn.RemoteAddr(), protocolMagic)
+
+	var prot protocol.Protocol
+	switch protocolMagic {
+	case &quot;  V2&quot;:
+		prot = &amp;protocolV2{ctx: p.ctx}
+	default:
+		protocol.SendFramedResponse(clientConn, frameTypeError, []byte(&quot;E_BAD_PROTOCOL&quot;))
+		clientConn.Close()
+		p.ctx.nsqd.logf(LOG_ERROR, &quot;client(%s) bad protocol magic '%s'&quot;,
+			clientConn.RemoteAddr(), protocolMagic)
+		return
+	}
+
+	err = prot.IOLoop(clientConn)
+	if err != nil {
+		p.ctx.nsqd.logf(LOG_ERROR, &quot;client(%s) - %s&quot;, clientConn.RemoteAddr(), err)
+		return
+	}
+}
+</code></pre>
+<p>可以看到，处理过程首先会读取4个字节的版本号，并判断当前协议版本是否为V2，不是的话则终止连接，接着创建protocolV2实例，调用IOLoop进入客户端连接的读写循环，我们再看下IOLoop的具体代码：</p>
+<pre><code class="language-go">func (p *protocolV2) IOLoop(conn net.Conn) error {
+	var err error
+	var line []byte
+	var zeroTime time.Time
+
+	clientID := atomic.AddInt64(&amp;p.ctx.nsqd.clientIDSequence, 1)
+	client := newClientV2(clientID, conn, p.ctx)
+	p.ctx.nsqd.AddClient(client.ID, client)
+
+	messagePumpStartedChan := make(chan bool)
+	go p.messagePump(client, messagePumpStartedChan)
+	&lt;-messagePumpStartedChan
+
+	for {
+		if client.HeartbeatInterval &gt; 0 {
+			client.SetReadDeadline(time.Now().Add(client.HeartbeatInterval * 2))
+		} else {
+			client.SetReadDeadline(zeroTime)
+		}
+
+		// ReadSlice does not allocate new space for the data each request
+		// ie. the returned slice is only valid until the next call to it
+		line, err = client.Reader.ReadSlice('\n')
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+			} else {
+				err = fmt.Errorf(&quot;failed to read command - %s&quot;, err)
+			}
+			break
+		}
+
+		// trim the '\n'
+		line = line[:len(line)-1]
+		// optionally trim the '\r'
+		if len(line) &gt; 0 &amp;&amp; line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+		params := bytes.Split(line, separatorBytes)
+
+		p.ctx.nsqd.logf(LOG_DEBUG, &quot;PROTOCOL(V2): [%s] %s&quot;, client, params)
+
+		var response []byte
+		response, err = p.Exec(client, params)
+		if err != nil {
+			ctx := &quot;&quot;
+			if parentErr := err.(protocol.ChildErr).Parent(); parentErr != nil {
+				ctx = &quot; - &quot; + parentErr.Error()
+			}
+			p.ctx.nsqd.logf(LOG_ERROR, &quot;[%s] - %s%s&quot;, client, err, ctx)
+
+			sendErr := p.Send(client, frameTypeError, []byte(err.Error()))
+			if sendErr != nil {
+				p.ctx.nsqd.logf(LOG_ERROR, &quot;[%s] - %s%s&quot;, client, sendErr, ctx)
+				break
+			}
+
+			// errors of type FatalClientErr should forceably close the connection
+			if _, ok := err.(*protocol.FatalClientErr); ok {
+				break
+			}
+			continue
+		}
+
+		if response != nil {
+			err = p.Send(client, frameTypeResponse, response)
+			if err != nil {
+				err = fmt.Errorf(&quot;failed to send response - %s&quot;, err)
+				break
+			}
+		}
+	}
+
+	p.ctx.nsqd.logf(LOG_INFO, &quot;PROTOCOL(V2): [%s] exiting ioloop&quot;, client)
+	conn.Close()
+	close(client.ExitChan)
+	if client.Channel != nil {
+		client.Channel.RemoveClient(client.ID)
+	}
+
+	p.ctx.nsqd.RemoveClient(client.ID)
+	return err
+}
+</code></pre>
+<p>IOLoop的主要逻辑即为循环读取客户端发送的命令并执行，然后给客户端返回响应，需要注意的是，代码中单独开启了一个协程执行messagePump，该方法主要承担接收消息并分发给客户端、向客户端发送心跳包等功能</p>
+<h2 id="接收消息">接收消息</h2>
+<p>接收消息的过程由客户端发送PUB命令开始，然后再由protocol_v2.go中的IOLoop中读取命令并执行，PUB命令的具体执行过程大致如下：<br>
+1、解析PUB命令参数，得到topic名称以及消息内容<br>
+2、根据topic名称获取topic实例，调用topic.PutMessage发送消息，PutMessage方法实现上则是往topic内部的消息管道（memoryMsgChan）中发送消息</p>
+<h2 id="投递消息">投递消息</h2>
+<h3 id="直接投递">直接投递</h3>
+<p>之前我们讲解了nsq中存在的Topic和Channel等概念，因此一条消息的投递会先由Topic分发给Channel，然后再由Channel到client，我们分别看下这两个投递过程</p>
+<p>1、Topic -&gt; Channel，每个Topic创建出来的时候（NewTopic方法）都会开启一个额外的协程执行messagePump，我们看看该方法的具体逻辑：</p>
+<pre><code class="language-go">func (t *Topic) messagePump() {
+	t.RLock()
+	for _, c := range t.channelMap {
+		chans = append(chans, c)
+	}
+	t.RUnlock()
+
+	for {
+		select {
+		case msg = &lt;-memoryMsgChan:
+		case buf = &lt;-backendChan:
+			msg, err = decodeMessage(buf)
+			if err != nil {
+				t.ctx.nsqd.logf(LOG_ERROR, &quot;failed to decode message - %s&quot;, err)
+				continue
+			}
+		}
+
+		for i, channel := range chans {
+			chanMsg := msg
+			if i &gt; 0 {
+				chanMsg = NewMessage(msg.ID, msg.Body)
+				chanMsg.Timestamp = msg.Timestamp
+				chanMsg.deferred = msg.deferred
+			}
+			if chanMsg.deferred != 0 {
+				channel.PutMessageDeferred(chanMsg, chanMsg.deferred)
+				continue
+			}
+			err := channel.PutMessage(chanMsg)
+			if err != nil {
+				t.ctx.nsqd.logf(LOG_ERROR,
+					&quot;TOPIC(%s) ERROR: failed to put msg(%s) to channel(%s) - %s&quot;,
+					t.name, msg.ID, channel.name, err)
+			}
+		}
+	}
+
+exit:
+	t.ctx.nsqd.logf(LOG_INFO, &quot;TOPIC(%s): closing ... messagePump&quot;, t.name)
+}
+</code></pre>
+<p>上面代码经过简化后，只保留了与消息投递有关的代码，可以看到messagePump方法会一直从Topic的消息管道中读取消息，然后将消息分发给当前所有的Channel</p>
+<p>2、channel -&gt; client，第一步中topic将消息分发给Channel，实现上是Channel会将消息发给自己的内部管道memoryMsgChan，客户端会从该消息管道中读取消息，从而到达消息分发的目的，具体代码可以看protocol_v2.go中的messagePump方法</p>
+<h3 id="延迟投递">延迟投递</h3>
+<p>nsq中支持了消息的延迟投递，我们来看看具体实现的逻辑：<br>
+1、每个Topic对应的Channel内部结构中存在一个优先级队列（Channel.deferredPQ，具体实现为最小堆），通过DeferredPublish发送的延迟消息首先会进入到Channel的优先级队列中，队列中每个元素的优先级具体值为延迟的时间<br>
+2、nsqd启动时有个queueScanLoop函数，这个函数每隔一定的时间间隔（配置项：QueueScanInterval）会拿到当前所有的channel，取一部分（配置项：QueueScanSelectionCount）进行扫描，并调用Channel的processDeferredQueue方法，processDeferredQueue方法则用来处理延迟消息，会从其对应的优先级队列中取出比当前时间小的那些消息进行发送，发送的过程跟上述的直接投递过程一样，这里就不细讲了</p>
+<h3 id="超时处理">超时处理</h3>
+<p>nsq中的消息投递模型为至少一次，那么就需要引入超时重传与确认机制，我们接着具体看看nsq是如何处理超时消息的：<br>
+1、与延迟投递类似，每个Topic对应的Channel内部结构中还存在另一个优先级队列（Channel.inFlightPQ），发送给客户端且还未收到处理结果的消息会存放在队列中，元素的优先级具体值为消息超时的时间<br>
+2、上面将延迟投递的时候，有讲到queueScanLoop这个函数，此函数在扫描Channel过程中也会调用Channel的processInFlightQueue方法，processInFlightQueue则会处理Channel中的超时消息，将这些超时消息取出来重新投递</p>
+<h3 id="流量控制">流量控制</h3>
+<p>关于流量控制这一块我们在上一篇讲消费者客户端的时候已经有所描述，即通过发送RDY状态来限制客户端的消息接收，下面我们就来看看nsqd实例在接收客户端发送的RDY值之后会有哪些变化，具体代码就在<code>nsqd/protocol_v2.go</code>中：</p>
+<pre><code class="language-go">func (p *protocolV2) RDY(client *clientV2, params [][]byte) ([]byte, error) {
+	count := int64(1)
+	if len(params) &gt; 1 {
+		b10, err := protocol.ByteToBase10(params[1])
+		if err != nil {
+			return nil, protocol.NewFatalClientErr(err, &quot;E_INVALID&quot;,
+				fmt.Sprintf(&quot;RDY could not parse count %s&quot;, params[1]))
+		}
+		count = int64(b10)
+	}
+
+	if count &lt; 0 || count &gt; p.ctx.nsqd.getOpts().MaxRdyCount {
+		// this needs to be a fatal error otherwise clients would have
+		// inconsistent state
+		return nil, protocol.NewFatalClientErr(nil, &quot;E_INVALID&quot;,
+			fmt.Sprintf(&quot;RDY count %d out of range 0-%d&quot;, count, p.ctx.nsqd.getOpts().MaxRdyCount))
+	}
+
+	client.SetReadyCount(count)
+
+	return nil, nil
+}
+</code></pre>
+<p>当nsqd接收到客户端发送的RDY命令时，会调用client.SetReadyCount(count)方法，将该客户端ReadyCount设置为count，当客户端触发流量控制时，count即为0，接着我们看投递消息给客户端时的处理逻辑：</p>
+<pre><code class="language-go">func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
+	for {
+		if subChannel == nil || !client.IsReadyForMessages() {
+			// the client is not ready to receive messages...
+			memoryMsgChan = nil
+			backendMsgChan = nil
+			flusherChan = nil
+			// force flush
+			client.writeLock.Lock()
+			err = client.Flush()
+			client.writeLock.Unlock()
+			if err != nil {
+				goto exit
+			}
+			flushed = true
+		}
+    
+        select {
+        case &lt;-client.ReadyStateChan:
+        case &lt;-heartbeatChan:
+        case b := &lt;-backendMsgChan:
+        case msg := &lt;-memoryMsgChan:
+        }
+	}
+}
+</code></pre>
+<p>这里我将messagePump其他逻辑都屏蔽掉了，想要突出的是if条件判断中的<code>!client.IsReadyForMessages()</code>，当消费者客户端进行流量控制时，会将RDY置为0，此时client的IsReadyForMessages则返回false，整个条件判断逻辑也就为true，然后执行if块中的代码，即将memoryMsgChan和backendMsgChan设置为nil，置为nil后代码之后的select逻辑也就无法从消息管道中获取消息，从而达到限制该客户端接收消息的目的</p>
+<h2 id="持久化">持久化</h2>
+<p>nsq目前有两块持久化数据的逻辑：<br>
+1、当nsqd实例存在topic、channel新建、删除等元数据变化的时候，会进行持久化，具体方法可见nsqd.PersistMetadata<br>
+2、nsqd优先采用内存存储消息，当堆积的消息超过配置的最大内存消息数时则会进行持久化存储，目前nsq基于文件系统实现了一个先进先出的队列，源码地址：<a href="http://github.com/go-diskqueue">github.com/go-diskqueue</a></p>
+
+    </div>
+</div>
+
+<div class="cube-article-nav">
+    <ul>
+        
+        <li class="prev">
+            <a href="/2020/04/14/nsq-3/">
+                <i class="cube-icon cube-prev" aria-hidden="true"></i>
+                消息队列NSQ源码分析（四）：nsqlookupd
+            </a>
+        </li>
+        
+        
+        <li class="next">
+            <a href="/2020/04/14/nsq-1/">
+                消息队列NSQ源码分析（二）：go-nsq
+                <i class="cube-icon cube-next" aria-hidden="true"></i>
+            </a>
+        </li>
+        
+    </ul>
+</div>
+
+
+<!-- TODO 根据theme.comment的内容进行入口选择 -->
+
+
+
+        </div>
+        <div class="cube-right">
+            
+
+<div class="cube-search cube-sidebar" id="cube-search">
+    <div class="search-container">
+        <input type="text" placeholder="Search" class="cube-search-input" id="cube-search-input">
+        <i class="cube-icon cube-icon-search cube-search-submit" aria-hidden="true"></i>
+    </div>
+    <!-- TODO 通过给window赋一个全局变量，通过脚本赋值 -->
+</div>
+<script>
+    (function (window) {
+        'use strict';
+        window.searchModule = {}
+        window.searchModule.JSONUrl = '/content.json'
+        window.searchModule.rootUrl = '/'
+    })(window)
+</script>
+<div class="cube-search-form">
+    <div class="cube-search-control">
+        <input type="text" placeholder="Search" class="search-input">
+        <a class="close-button">
+            <i class="cube-icon cube-close" aria-hidden="true"></i>
+        </a>
+    </div>
+    <div class="cube-search-result"></div>
+</div>
+
+
+<div class="cube-author cube-sidebar" id="cube-author">
+    
+    
+    <style>
+        @media(min-width: 768px) {
+            .cube-author img {
+                margin-top: 40px;
+                margin-bottom: 10px;
+            }
+        }
+        @media(max-width: 1120px) and (min-width: 768px) {
+            .cube-author img {
+                width: 128px;
+                height: 128px;
+            }
+        }
+        @media(min-width: 1120px) {
+            .cube-author img {
+                width: 160px;
+                height: 160px;
+            }
+        }
+    </style>
+    
+    <img src="/images/jugg.jpg" alt="avatar" class="cube-avatar">
+    
+    
+    <span>Jugg Li</span>
+    
+    
+    <div class="count">
+        <a class="count articles"><span>4</span>Article</a>
+        <a class="count tags"><span>1</span>Tags</a>
+        <a class="count categories"><span>1</span>Categories</a>
+    </div>
+</div>
+
+
+
+<div class="cube-recent-posts cube-sidebar" id="cube-recent-posts">
+    <div class="title">
+        <a>Recent Posts</a>
+    </div>
+    <ul class="list">
+        
+        
+        <li>
+            <!-- TODO 如果文章要显示图片，那么在front-matter上添加preview属性(url or path) -->
+            
+            <div class="normal">
+                <p class="index first">
+                    <span>1</span>
+                </p>
+                <p class="title">
+                    <a href="/2020/04/14/nsq-3/" title="消息队列NSQ源码分析（四）：nsqlookupd">消息队列NSQ源码分析（四）：nsqlookupd</a>
+                </p>
+            </div>
+            
+        </li>
+        
+        
+        
+        <li>
+            <div class="normal">
+                <p class="index">
+                    <span>2</span>
+                </p>
+                <p class="title">
+                    <a href="/2020/04/14/nsq-2/" title="消息队列NSQ源码分析（三）：nsqd">消息队列NSQ源码分析（三）：nsqd</a>
+                </p>
+            </div>
+        </li>
+        
+        
+        
+        <li>
+            <div class="normal">
+                <p class="index">
+                    <span>3</span>
+                </p>
+                <p class="title">
+                    <a href="/2020/04/14/nsq-1/" title="消息队列NSQ源码分析（二）：go-nsq">消息队列NSQ源码分析（二）：go-nsq</a>
+                </p>
+            </div>
+        </li>
+        
+        
+        
+        <li>
+            <div class="normal">
+                <p class="index">
+                    <span>4</span>
+                </p>
+                <p class="title">
+                    <a href="/2020/04/14/nsq-0/" title="消息队列NSQ源码分析（一）：概述">消息队列NSQ源码分析（一）：概述</a>
+                </p>
+            </div>
+        </li>
+        
+        
+    </ul>
+</div>
+
+
+
+<div class="cube-categories cube-sidebar" id="cube-categories">
+    <div class="title">
+        <a href="/categories">Categories</a>
+    </div>
+    <div class="cube-boxs">
+        
+        
+        <div class="cube-box ">
+            <a href="/categories/消息队列/">#消息队列</a>
+        </div>
+        
+    </div>
+</div>
+
+
+
+<div class="cube-tagcloud cube-sidebar" id="cube-tagcloud">
+    <div class="title">
+        <a href="/tags">Tagcloud</a>
+    </div>
+    <div class="cube-boxs">
+        
+        
+        <div class="cube-box ">
+            <a href="/tags/nsq/">#nsq</a>
+        </div>
+        
+    </div>
+</div>
+
+
+
+<div class="cube-links cube-sidebar" id="cube-links">
+    <div class="title">
+        <a>Links</a>
+    </div>
+    <ul class="list">
+        
+        <li>
+            
+            
+            <img src="/images/GitHub.png">
+            
+            <a href="https://github.com/thekingofworld" target="_blank">GitHub</a>
+        </li>
+        
+    </ul>
+</div>
+
+
+
+<div class="cube-friend-links cube-sidebar" id="cube-friend-links">
+    <div class="title">
+        <a>Friend Links</a>
+    </div>
+    <ul class="list">
+        
+        <li>
+            <!-- TODO change avatar.png to friend.png-->
+            <img src="/images/friend_links.jpg ">
+            <a href="x" target="_blank">x</a>
+        </li>
+        
+    </ul>
+</div>
+
+
+        </div>
+    </div>
+</div>
+<footer class="cube-footer">
+    
+© 2020 Jugg Li
+
+<br>
+Powered by <a href="https://hexo.io/" target="_blank">Hexo</a>.&nbsp;Theme by <a href="https://github.com/ZEROKISEKI" target="_blank">AONOSORA</a>
+</footer>
+<!-- inject:script -->
+<script src="/js/script.js"></script>
+<!-- endinject -->
+<div class="cube-loading out"></div>
+</body>
+</html>
