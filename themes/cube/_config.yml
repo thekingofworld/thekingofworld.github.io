@@ -2,7 +2,7 @@ theme: cube
 
 # background display for mobile, not for pc
 header:
-  background: /images/dota.jpg
+  background: https://s1.ax1x.com/2020/04/14/Jp646H.jpg
   # both pc and mobile required title(make it the same as your hexo site _config.yml's title)
   title: 李小耀耀耀耀耀
 
@@ -10,7 +10,7 @@ header:
 # background display for pc
 # you can use url or path relative
 # `background: background.png` refers to the path "source/images/background.png"
-background: dota.jpg
+background: https://s1.ax1x.com/2020/04/14/Jp646H.jpg
 
 
 # the background image width and height (you can see your image file to get them)
@@ -59,7 +59,7 @@ sidebar:
     - title: GitHub
       url: https://github.com/thekingofworld
       # icon can be url or path
-      icon: GitHub.png
+      icon: https://s1.ax1x.com/2020/04/14/Jpc83D.png
   friend_links:
     - title: x
       url: x
